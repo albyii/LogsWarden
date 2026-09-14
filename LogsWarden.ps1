@@ -486,7 +486,7 @@ function Make-Button([string]$Text) {
     $b.FlatStyle = "Flat"
     $b.FlatAppearance.BorderSize = 1
     $b.BackColor = $PANEL2
-    $b.ForeColor = $TEXT_COLOR
+    $b.ForeColor = $TEXT
     $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold",9)
     $b.Cursor = [System.Windows.Forms.Cursors]::Hand
     return $b
