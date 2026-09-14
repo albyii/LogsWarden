@@ -449,6 +449,7 @@ $script:ScannedFiles = 0
 $script:TotalLines = 0
 $script:ScanSeconds = 0
 $script:Cancelled = $false
+    $script:CheatingAssumption = 'NO'
 
 function Write-Color([string]$Text,[ConsoleColor]$Color = [ConsoleColor]::Gray,[switch]$NoNewLine) {
     $old = [Console]::ForegroundColor
@@ -536,6 +537,7 @@ function Scan-Logs([string]$Root) {
     $script:ScannedFiles = 0
     $script:TotalLines = 0
     $script:Cancelled = $false
+    $script:CheatingAssumption = 'NO'
 
     $files = @(Get-LogFiles $Root)
     $fileCount = $files.Count
@@ -601,45 +603,75 @@ function Scan-Logs([string]$Root) {
     Write-Color "  Detections: $finalDet   Leads: $finalLead   Lines: $($script:TotalLines)   Time: $($script:ScanSeconds)s" Gray
 }
 
-function Get-Assessment {
+function Get-CheatingAssumption {
+    # Simple moderation assumption: YES or NO only.
+    # This is an automated evidence-based estimate, not proof of player behavior.
+    $detections=@($script:Results | Where-Object Kind -eq 'DETECTION')
+    $unique=@($detections | Select-Object -ExpandProperty Name -Unique)
+    $cheating = ($unique.Count -ge 2 -or $detections.Count -ge 1 -and @($detections | Where-Object Weight -ge 16).Count -ge 1)
+    $script:CheatingAssumption = if($cheating){'YES'}else{'NO'}
+    return $script:CheatingAssumption
+}
+function Get-CheatSummary {
     $detections=@($script:Results|Where-Object Kind -eq 'DETECTION')
     $leads=@($script:Results|Where-Object Kind -eq 'LEAD')
-    $score=0
-    $script:Results|Where-Object Kind -eq 'DETECTION'|Group-Object Name|ForEach-Object {$score += [int]($_.Group|Sort-Object Weight -Descending|Select-Object -First 1).Weight}
-    $unique=@($detections|Select-Object -ExpandProperty Name -Unique).Count
-    $score += [Math]::Min(25,[Math]::Max(0,$unique-1)*3)
-    $score=[Math]::Min(100,$score)
-    if($detections.Count -eq 0 -and $leads.Count -eq 0){return 'CLEAN / NO MATCHES'}
-    if($score -ge 65 -or $unique -ge 5){return 'HIGH REVIEW'}
-    if($score -ge 35 -or $unique -ge 2){return 'MEDIUM REVIEW'}
-    if($detections.Count -gt 0){return 'LOW REVIEW'}
-    return 'LEADS ONLY'
+    $uniqueDet=@($detections | Group-Object Name | ForEach-Object { $_.Group | Sort-Object Weight -Descending | Select-Object -First 1 })
+
+    if($uniqueDet.Count -eq 0 -and $leads.Count -eq 0){
+        return 'No specific cheats detected.'
+    }
+
+    $names=@($uniqueDet | Select-Object -ExpandProperty Name -Unique)
+    if($names.Count -gt 0){
+        return ($names -join ', ')
+    }
+    return 'No specific cheat signature detected; review the security/behavior leads.'
 }
 
 function Get-FullReportText {
-    $assessment=Get-Assessment
+    $cheating=Get-CheatingAssumption
+    $cheats=Get-CheatSummary
     $det=@($script:Results|Where-Object Kind -eq 'DETECTION')
     $lead=@($script:Results|Where-Object Kind -eq 'LEAD')
+    $uniqueDet=@($det | Group-Object Name | ForEach-Object { $_.Group | Sort-Object Weight -Descending | Select-Object -First 1 })
     $out=[System.Collections.Generic.List[string]]::new()
     [void]$out.Add('============================================================')
     [void]$out.Add('LOGSWARDEN - MINECRAFT LOG ANALYSIS REPORT')
     [void]$out.Add('============================================================')
-    [void]$out.Add("Assessment : $assessment")
-    [void]$out.Add("Root       : $script:SelectedRoot")
-    [void]$out.Add("Files      : $script:ScannedFiles")
-    [void]$out.Add("Lines      : $script:TotalLines")
-    [void]$out.Add("Detections : $($det.Count)")
-    [void]$out.Add("Leads      : $($lead.Count)")
-    [void]$out.Add("Scan time  : $script:ScanSeconds seconds")
-    [void]$out.Add("Generated  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    [void]$out.Add("CHEATING ASSUMPTION : $cheating")
+    [void]$out.Add("LIKELY CHEATS       : $cheats")
+    [void]$out.Add("Root                 : $script:SelectedRoot")
+    [void]$out.Add("Files                : $script:ScannedFiles")
+    [void]$out.Add("Lines                : $script:TotalLines")
+    [void]$out.Add("Unique Detections    : $($(@($det|Select-Object -ExpandProperty Name -Unique)).Count)")
+    [void]$out.Add("Detection Matches    : $($det.Count)")
+    [void]$out.Add("Leads                : $($lead.Count)")
+    [void]$out.Add("Scan time            : $script:ScanSeconds seconds")
+    [void]$out.Add("Generated            : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     [void]$out.Add('')
-    [void]$out.Add('NOTE: Matches are evidence leads. Review the exact log evidence before')
-    [void]$out.Add('making an enforcement decision.')
+    [void]$out.Add('NOTE: CHEATING ASSUMPTION is an automated moderation estimate based on')
+    [void]$out.Add('configured signatures. It is not proof of player behavior.')
     [void]$out.Add('')
     [void]$out.Add('FINDINGS')
     [void]$out.Add('------------------------------------------------------------')
     if($script:Results.Count -eq 0){[void]$out.Add('No signatures matched the scanned logs.')}
-    else { foreach($r in $script:Results){[void]$out.Add('');[void]$out.Add("[$($r.Kind)] $($r.Name)");[void]$out.Add("Category : $($r.Category)");[void]$out.Add("Weight   : $($r.Weight)");[void]$out.Add("Pattern  : $($r.Pattern)");[void]$out.Add("File     : $($r.File)");[void]$out.Add("Line     : $($r.Line)");[void]$out.Add("Reason   : $($r.Reason)");[void]$out.Add("Evidence : $($r.Evidence)")} }
+    else {
+        # Keep the report compact: each unique detection is listed once.
+        foreach($r in $uniqueDet){
+            [void]$out.Add('')
+            [void]$out.Add("[$($r.Kind)] $($r.Name)")
+            [void]$out.Add("Category : $($r.Category)")
+                    [void]$out.Add("Pattern  : $($r.Pattern)")
+            [void]$out.Add("File     : $($r.File)")
+            [void]$out.Add("Line     : $($r.Line)")
+            [void]$out.Add("Reason   : $($r.Reason)")
+            [void]$out.Add("Evidence : $($r.Evidence)")
+        }
+        if($leads.Count -gt 0){
+            [void]$out.Add('')
+            [void]$out.Add("ADDITIONAL LEADS: $(@($leads|Select-Object -ExpandProperty Name -Unique) -join ', ')")
+        }
+    }
     return ($out -join [Environment]::NewLine)
 }
 
@@ -660,28 +692,40 @@ function Save-Report {
 
 function Show-Summary {
     Write-Header 'SCAN RESULTS / EVIDENCE REVIEW'
-    $assessment=Get-Assessment
+    $cheating=Get-CheatingAssumption
+    $cheats=Get-CheatSummary
     $det=@($script:Results|Where-Object Kind -eq 'DETECTION')
     $lead=@($script:Results|Where-Object Kind -eq 'LEAD')
-    Write-Color "  ASSESSMENT" DarkGray
-    switch -Regex($assessment){'^HIGH'{Write-Color "  $assessment" Red};'^MEDIUM|^LOW'{Write-Color "  $assessment" Yellow};'LEADS'{Write-Color "  $assessment" Magenta};default{Write-Color "  $assessment" Green}}
+
+    Write-Color '  MODERATION ASSUMPTION' DarkGray
+    if($cheating -eq 'YES'){Write-Color '  CHEATING: YES' Red}
+    else {Write-Color '  CHEATING: NO' Green}
     Write-Rule
+
+    Write-Color '  WHAT CHEATS MAY HE USE?' Cyan
+    Write-Color "  $cheats" White
+    Write-Rule
+
     Write-Color "  Files analyzed : $script:ScannedFiles" Gray
     Write-Color "  Lines analyzed : $script:TotalLines" Gray
-    Write-Color "  Detections     : $($det.Count)" Gray
+    Write-Color "  Unique cheats  : $(@($det|Select-Object -ExpandProperty Name -Unique).Count)" Gray
     Write-Color "  Leads          : $($lead.Count)" Gray
     Write-Color "  Scan time      : $script:ScanSeconds seconds" Gray
-    Write-Color ""
+    Write-Color ''
+
     if($script:Results.Count -eq 0){Write-Color '  No signature matches found.' DarkGray; return}
-    Write-Color '  FINDINGS' Cyan
+    Write-Color '  DETECTIONS (each shown once)' Cyan
     Write-Rule
     $n=0
-    foreach($r in $script:Results){
+    $unique=@($det | Group-Object Name | ForEach-Object { $_.Group | Sort-Object Weight -Descending | Select-Object -First 1 })
+    foreach($r in $unique){
         $n++
-        $col=if($r.Kind -eq 'DETECTION'){[ConsoleColor]::Red}elseif($r.Weight -ge 16){[ConsoleColor]::Yellow}else{[ConsoleColor]::Magenta}
-        Write-Color ("  [{0:00}] {1}  +{2}" -f $n,$r.Name,$r.Weight) $col
-        Write-Color ("       {0} | {1} | line {2}" -f $r.Kind,[IO.Path]::GetFileName($r.File),$r.Line) DarkGray
-        Write-Color ("       {0}" -f $r.Evidence) Gray
+        $col=[ConsoleColor]::Red
+        Write-Color ("  [{0:00}] {1}" -f $n,$r.Name) $col
+    }
+    if($lead.Count -gt 0){
+        Write-Color ''
+        Write-Color ("  ADDITIONAL LEADS (not counted as specific cheats): " + (@($lead|Select-Object -ExpandProperty Name -Unique) -join ', ')) DarkGray
     }
 }
 
@@ -713,7 +757,7 @@ function Start-Scan {
 }
 
 function Clear-Results {
-    $script:Results=@();$script:ScannedFiles=0;$script:TotalLines=0;$script:ScanSeconds=0
+    $script:Results=@();$script:ScannedFiles=0;$script:TotalLines=0;$script:ScanSeconds=0;$script:CheatingAssumption='NO'
     Write-Color '  ✓ RESULTS CLEARED' Green
 }
 
@@ -739,7 +783,7 @@ function Show-Menu {
 
 while($true){
     Show-Menu
-    $choice=Read-Host '  MODWARDEN >'
+    $choice=Read-Host '  LOGSWARDEN >'
     switch($choice.Trim().ToUpperInvariant()){
         '1'{Auto-Detect|Out-Null;Start-Scan;Pause-Console}
         '2'{Choose-Folder|Out-Null;Pause-Console}
