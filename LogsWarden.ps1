@@ -13,6 +13,9 @@
       powershell -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/albyii/LogsWarden/main/LogsWarden.ps1' | iex"
 #>
 
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -483,7 +486,7 @@ function Make-Button([string]$Text) {
     $b.FlatStyle = "Flat"
     $b.FlatAppearance.BorderSize = 1
     $b.BackColor = $PANEL2
-    $b.ForeColor = $TEXT
+    $b.ForeColor = $TEXT_COLOR
     $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold",9)
     $b.Cursor = [System.Windows.Forms.Cursors]::Hand
     return $b
