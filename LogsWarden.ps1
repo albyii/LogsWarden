@@ -7,7 +7,7 @@
       - This script only READS text/log files.
       - It never executes Minecraft mods, jars, DLLs, or log contents.
       - Matches are evidence leads. A string match alone is NOT proof that a player cheated.
-      - Designed to work as a single-file PowerShell 5.1+ tool with a Windows Forms GUI.
+      - Designed to work as a single-file PowerShell 5.1+ CMD/console tool.
 
     One-line launcher:
       powershell -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/albyii/LogsWarden/main/LogsWarden.ps1' | iex"
@@ -16,9 +16,6 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
 
 # -----------------------------
 # Detection database
@@ -444,52 +441,47 @@ Add-Signature "Connection / Packet Error" "Log Pattern" 5 "Network/packet error 
 ) -Lead
 
 # -----------------------------
-# UI / state
+# Console UI / state
 # -----------------------------
 $script:Results = @()
 $script:SelectedRoot = $null
-$script:CurrentFilter = "ALL"
-$script:CurrentSearch = ""
 $script:ScannedFiles = 0
 $script:TotalLines = 0
 $script:ScanSeconds = 0
-$script:StartedAt = $null
 $script:Cancelled = $false
 
-function C([int]$r,[int]$g,[int]$b) {
-    [System.Drawing.Color]::FromArgb($r,$g,$b)
+function Write-Color([string]$Text,[ConsoleColor]$Color = [ConsoleColor]::Gray,[switch]$NoNewLine) {
+    $old = [Console]::ForegroundColor
+    [Console]::ForegroundColor = $Color
+    if ($NoNewLine) { [Console]::Write($Text) } else { [Console]::WriteLine($Text) }
+    [Console]::ForegroundColor = $old
 }
 
-$BG     = C 9 11 15
-$PANEL  = C 16 19 25
-$PANEL2 = C 22 26 34
-$TEXT   = C 235 239 245
-$MUTED  = C 145 154 170
-$ACCENT = C 105 175 255
-$GOOD   = C 80 215 145
-$WARN   = C 255 190 70
-$BAD    = C 255 85 105
-$PURPLE = C 180 130 255
-$LINE   = C 43 49 62
+function Clear-Screen { Clear-Host }
 
-function Add-Ui {
-    param($Parent,$Child,[int]$X,[int]$Y,[int]$W,[int]$H)
-    $Child.Location = New-Object System.Drawing.Point($X,$Y)
-    $Child.Size = New-Object System.Drawing.Size($W,$H)
-    [void]$Parent.Controls.Add($Child)
-    return $Child
+function Write-Line([string]$Text = "", [ConsoleColor]$Color = [ConsoleColor]::Gray) {
+    Write-Color $Text $Color
 }
 
-function Make-Button([string]$Text) {
-    $b = New-Object System.Windows.Forms.Button
-    $b.Text = $Text
-    $b.FlatStyle = "Flat"
-    $b.FlatAppearance.BorderSize = 1
-    $b.BackColor = $PANEL2
-    $b.ForeColor = $TEXT
-    $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold",9)
-    $b.Cursor = [System.Windows.Forms.Cursors]::Hand
-    return $b
+function Write-Rule {
+    Write-Color ("─" * 76) DarkGray
+}
+
+function Write-Header([string]$Subtitle = "MINECRAFT LOG FORENSIC ANALYZER") {
+    Clear-Screen
+    Write-Color "" DarkGray
+    Write-Color "  ╔══════════════════════════════════════════════════════════════════════════╗" Cyan
+    Write-Color "  ║                         L O G S W A R D E N                            ║" Cyan
+    Write-Color "  ║                 MINECRAFT FORENSIC ANALYZER                            ║" DarkCyan
+    Write-Color "  ╚══════════════════════════════════════════════════════════════════════════╝" Cyan
+    Write-Color ("  " + $Subtitle) Gray
+    Write-Color ""
+}
+
+function Pause-Console {
+    Write-Color "" DarkGray
+    Write-Color "  Press ENTER to continue..." DarkGray
+    [void](Read-Host)
 }
 
 function Get-DefaultRoots {
@@ -505,39 +497,41 @@ function Get-DefaultRoots {
 
 function Get-LogFiles([string]$Root) {
     if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
-
     try {
         Get-ChildItem -LiteralPath $Root -File -Recurse -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.Length -le 50MB -and (
-                    $_.Extension -in @(".log",".txt",".latest",".json",".log.gz") -or
+                    $_.Extension -in @('.log','.txt','.latest','.json','.log.gz') -or
                     $_.Name -match '^(latest|debug|launcher.*|crash-.*)\.log$'
                 )
             }
-    } catch {
-        @()
-    }
+    } catch { @() }
 }
 
 function New-Match($Sig,[string]$File,[int]$Line,[string]$Evidence,[string]$Pattern) {
-    $kind = if ($Sig.Lead) { "LEAD" } else { "DETECTION" }
-
+    $kind = if ($Sig.Lead) { 'LEAD' } else { 'DETECTION' }
     [PSCustomObject]@{
-        Name     = $Sig.Name
-        Category = $Sig.Category
-        Weight   = [int]$Sig.Weight
-        Kind     = $kind
-        Reason   = $Sig.Reason
-        File     = $File
-        Line     = $Line
-        Pattern  = $Pattern
-        Evidence = $Evidence.Trim()
+        Name=$Sig.Name; Category=$Sig.Category; Weight=[int]$Sig.Weight; Kind=$kind
+        Reason=$Sig.Reason; File=$File; Line=$Line; Pattern=$Pattern; Evidence=$Evidence.Trim()
     }
+}
+
+function Test-CancelKey {
+    if ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq [ConsoleKey]::C) { return $true }
+        if ($key.Key -eq [ConsoleKey]::Escape) { return $true }
+    }
+    return $false
+}
+
+function Get-Spinner([int]$Index) {
+    $chars = @('|','/','-','\\')
+    return $chars[$Index % $chars.Count]
 }
 
 function Scan-Logs([string]$Root) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
-
     $script:Results = @()
     $script:ScannedFiles = 0
     $script:TotalLines = 0
@@ -545,39 +539,40 @@ function Scan-Logs([string]$Root) {
 
     $files = @(Get-LogFiles $Root)
     $fileCount = $files.Count
+    if ($fileCount -eq 0) { $sw.Stop(); return }
 
-    if ($fileCount -eq 0) {
-        $sw.Stop()
-        $script:ScanSeconds = 0
-        return
-    }
+    Clear-Screen
+    Write-Color "" DarkGray
+    Write-Color "  ┌──────────────────────────────────────────────────────────────────────────┐" Cyan
+    Write-Color "  │                         LIVE FORENSIC SCAN                               │" Cyan
+    Write-Color "  └──────────────────────────────────────────────────────────────────────────┘" Cyan
+    Write-Color "  Target   : $Root" Gray
+    Write-Color "  Files    : $fileCount" Gray
+    Write-Color "  Cancel   : press C or ESC at any time" DarkYellow
+    Write-Color ""
 
-    $fileIndex = 0
-
+    $i=0
     foreach ($file in $files) {
-        if ($script:Cancelled) { break }
-
-        $fileIndex++
-        $script:ScannedFiles = $fileIndex
-
-        $pct = [int](($fileIndex / $fileCount) * 100)
-        $progress.Value = [Math]::Min(100,$pct)
-        $status.Text = "SCANNING  $fileIndex / $fileCount  •  $($file.Name)"
-        $form.Refresh()
-        [System.Windows.Forms.Application]::DoEvents()
+        if (Test-CancelKey) { $script:Cancelled=$true; break }
+        $i++
+        $script:ScannedFiles=$i
+        $pct=[int](($i/$fileCount)*100)
+        $barWidth=48
+        $filled=[int][Math]::Floor(($pct/100)*$barWidth)
+        $bar=('█'*$filled)+('░'*($barWidth-$filled))
+        $spinner=Get-Spinner $i
+        $detCount=@($script:Results | Where-Object Kind -eq 'DETECTION').Count
+        $leadCount=@($script:Results | Where-Object Kind -eq 'LEAD').Count
+        Write-Host ("`r  [{0}] {1,3}%  {2}  {3}/{4} files  |  detections: {5}  leads: {6}" -f $spinner,$pct,$bar,$i,$fileCount,$detCount,$leadCount) -NoNewline
+        Write-Host ""
+        Write-Color ("      CURRENT FILE: " + $file.FullName) DarkGray
 
         try {
-            $lineNo = 0
-
+            $lineNo=0
             foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
-                if ($script:Cancelled) { break }
-
-                $lineNo++
-                $script:TotalLines++
-
-                # Avoid massive memory usage and preserve the exact evidence line.
-                $lower = $line.ToLowerInvariant()
-
+                if (Test-CancelKey) { $script:Cancelled=$true; break }
+                $lineNo++; $script:TotalLines++
+                $lower=$line.ToLowerInvariant()
                 foreach ($sig in $Signatures) {
                     foreach ($pattern in $sig.Patterns) {
                         if ($lower.Contains($pattern.ToLowerInvariant())) {
@@ -587,141 +582,48 @@ function Scan-Logs([string]$Root) {
                     }
                 }
             }
-        } catch {
-            # Read-only analyzer: inaccessible/busy files are skipped.
-        }
+        } catch { }
+        if ($script:Cancelled) { break }
     }
 
-    # De-duplicate identical signature/file/line hits.
-    $script:Results = @(
+    $script:Results=@(
         $script:Results |
-            Group-Object Name,File,Line |
-            ForEach-Object {
-                $_.Group | Sort-Object Weight -Descending | Select-Object -First 1
-            } |
-            Sort-Object `
-                @{Expression={ if ($_.Kind -eq "DETECTION") { 0 } else { 1 } }}, `
-                @{Expression={ [int]$_.Weight }; Descending=$true}, `
-                Name,File,Line
+        Group-Object Name,File,Line |
+        ForEach-Object { $_.Group | Sort-Object Weight -Descending | Select-Object -First 1 } |
+        Sort-Object @{Expression={if($_.Kind -eq 'DETECTION'){0}else{1}}}, @{Expression={[int]$_.Weight};Descending=$true}, Name,File,Line
     )
-
-    $sw.Stop()
-    $script:ScanSeconds = [Math]::Round($sw.Elapsed.TotalSeconds,2)
+    $sw.Stop(); $script:ScanSeconds=[Math]::Round($sw.Elapsed.TotalSeconds,2)
+    $finalDet=@($script:Results | Where-Object Kind -eq 'DETECTION').Count
+    $finalLead=@($script:Results | Where-Object Kind -eq 'LEAD').Count
+    Write-Color ""
+    if ($script:Cancelled) { Write-Color "  ■ SCAN CANCELLED — PARTIAL RESULTS RETAINED" Yellow }
+    else { Write-Color "  ✓ SCAN COMPLETE — $fileCount files analyzed" Green }
+    Write-Color "  Detections: $finalDet   Leads: $finalLead   Lines: $($script:TotalLines)   Time: $($script:ScanSeconds)s" Gray
 }
 
 function Get-Assessment {
-    $detections = @($script:Results | Where-Object { $_.Kind -eq "DETECTION" })
-    $leads = @($script:Results | Where-Object { $_.Kind -eq "LEAD" })
-
-    $score = 0
-    $script:Results |
-        Where-Object { $_.Kind -eq "DETECTION" } |
-        Group-Object Name |
-        ForEach-Object {
-            $score += [int]($_.Group | Sort-Object Weight -Descending | Select-Object -First 1).Weight
-        }
-
-    # Repeated independent hits add a little evidence without making one noisy
-    # log line automatically decisive.
-    $uniqueDetectionNames = @($detections | Select-Object -ExpandProperty Name -Unique).Count
-    $score += [Math]::Min(25, [Math]::Max(0, $uniqueDetectionNames - 1) * 3)
-    $score = [Math]::Min(100,$score)
-
-    if ($detections.Count -eq 0 -and $leads.Count -eq 0) { return "CLEAN / NO MATCHES" }
-    if ($score -ge 65 -or $uniqueDetectionNames -ge 5) { return "HIGH REVIEW" }
-    if ($score -ge 35 -or $uniqueDetectionNames -ge 2) { return "MEDIUM REVIEW" }
-    if ($detections.Count -gt 0) { return "LOW REVIEW" }
-    return "LEADS ONLY"
-}
-
-function Get-FilteredResults {
-    $items = @($script:Results)
-    $q = $script:CurrentSearch.Trim().ToLowerInvariant()
-
-    switch ($script:CurrentFilter) {
-        "DETECTIONS" { $items = @($items | Where-Object Kind -eq "DETECTION") }
-        "LEADS"      { $items = @($items | Where-Object Kind -eq "LEAD") }
-        "HIGH"       { $items = @($items | Where-Object Weight -ge 16) }
-        "COMBAT"     { $items = @($items | Where-Object Category -eq "Combat") }
-        "MOVEMENT"   { $items = @($items | Where-Object Category -eq "Movement") }
-        "WORLD"      { $items = @($items | Where-Object Category -eq "World") }
-        "AUTOMATION" { $items = @($items | Where-Object Category -eq "Automation") }
-        "SECURITY"   { $items = @($items | Where-Object Category -eq "Security") }
-    }
-
-    if ($q) {
-        $items = @($items | Where-Object {
-            $_.Name.ToLowerInvariant().Contains($q) -or
-            $_.Category.ToLowerInvariant().Contains($q) -or
-            $_.File.ToLowerInvariant().Contains($q) -or
-            $_.Evidence.ToLowerInvariant().Contains($q) -or
-            $_.Pattern.ToLowerInvariant().Contains($q)
-        })
-    }
-
-    return @($items)
-}
-
-function Refresh-List {
-    $list.BeginUpdate()
-    $list.Items.Clear()
-
-    $items = @(Get-FilteredResults)
-
-    foreach ($r in $items) {
-        $row = New-Object System.Windows.Forms.ListViewItem($r.Name)
-        [void]$row.SubItems.Add($r.Kind)
-        [void]$row.SubItems.Add([string]$r.Weight)
-        [void]$row.SubItems.Add($r.Category)
-        [void]$row.SubItems.Add([System.IO.Path]::GetFileName($r.File))
-        [void]$row.SubItems.Add([string]$r.Line)
-        $row.Tag = $r
-
-        if ($r.Kind -eq "DETECTION") {
-            $row.ForeColor = $BAD
-        } elseif ($r.Weight -ge 16) {
-            $row.ForeColor = $WARN
-        } else {
-            $row.ForeColor = $PURPLE
-        }
-
-        [void]$list.Items.Add($row)
-    }
-
-    $list.EndUpdate()
-    $shown.Text = "SHOWING  $($items.Count) / $($script:Results.Count)"
-}
-
-function Refresh-Stats {
-    $detections = @($script:Results | Where-Object Kind -eq "DETECTION")
-    $leads = @($script:Results | Where-Object Kind -eq "LEAD")
-    $assessment = Get-Assessment
-
-    $filesValue.Text = [string]$script:ScannedFiles
-    $linesValue.Text = [string]$script:TotalLines
-    $matchValue.Text = [string]$detections.Count
-    $leadValue.Text = [string]$leads.Count
-    $timeValue.Text = "$($script:ScanSeconds)s"
-    $assessmentValue.Text = $assessment
-
-    switch -Regex ($assessment) {
-        "^HIGH"   { $assessmentValue.ForeColor = $BAD }
-        "^MEDIUM" { $assessmentValue.ForeColor = $WARN }
-        "^LOW"    { $assessmentValue.ForeColor = $WARN }
-        "LEADS"   { $assessmentValue.ForeColor = $PURPLE }
-        default   { $assessmentValue.ForeColor = $GOOD }
-    }
+    $detections=@($script:Results|Where-Object Kind -eq 'DETECTION')
+    $leads=@($script:Results|Where-Object Kind -eq 'LEAD')
+    $score=0
+    $script:Results|Where-Object Kind -eq 'DETECTION'|Group-Object Name|ForEach-Object {$score += [int]($_.Group|Sort-Object Weight -Descending|Select-Object -First 1).Weight}
+    $unique=@($detections|Select-Object -ExpandProperty Name -Unique).Count
+    $score += [Math]::Min(25,[Math]::Max(0,$unique-1)*3)
+    $score=[Math]::Min(100,$score)
+    if($detections.Count -eq 0 -and $leads.Count -eq 0){return 'CLEAN / NO MATCHES'}
+    if($score -ge 65 -or $unique -ge 5){return 'HIGH REVIEW'}
+    if($score -ge 35 -or $unique -ge 2){return 'MEDIUM REVIEW'}
+    if($detections.Count -gt 0){return 'LOW REVIEW'}
+    return 'LEADS ONLY'
 }
 
 function Get-FullReportText {
-    $assessment = Get-Assessment
-    $det = @($script:Results | Where-Object Kind -eq "DETECTION")
-    $lead = @($script:Results | Where-Object Kind -eq "LEAD")
-
-    $out = [System.Collections.Generic.List[string]]::new()
-    [void]$out.Add("============================================================")
-    [void]$out.Add("LOGSWARDEN - MINECRAFT LOG ANALYSIS REPORT")
-    [void]$out.Add("============================================================")
+    $assessment=Get-Assessment
+    $det=@($script:Results|Where-Object Kind -eq 'DETECTION')
+    $lead=@($script:Results|Where-Object Kind -eq 'LEAD')
+    $out=[System.Collections.Generic.List[string]]::new()
+    [void]$out.Add('============================================================')
+    [void]$out.Add('LOGSWARDEN - MINECRAFT LOG ANALYSIS REPORT')
+    [void]$out.Add('============================================================')
     [void]$out.Add("Assessment : $assessment")
     [void]$out.Add("Root       : $script:SelectedRoot")
     [void]$out.Add("Files      : $script:ScannedFiles")
@@ -730,510 +632,123 @@ function Get-FullReportText {
     [void]$out.Add("Leads      : $($lead.Count)")
     [void]$out.Add("Scan time  : $script:ScanSeconds seconds")
     [void]$out.Add("Generated  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    [void]$out.Add("")
-    [void]$out.Add("NOTE: Matches are evidence leads. Review the exact log evidence before")
-    [void]$out.Add("making an enforcement decision.")
-    [void]$out.Add("")
-    [void]$out.Add("FINDINGS")
-    [void]$out.Add("------------------------------------------------------------")
-
-    if ($script:Results.Count -eq 0) {
-        [void]$out.Add("No signatures matched the scanned logs.")
-    } else {
-        foreach ($r in $script:Results) {
-            [void]$out.Add("")
-            [void]$out.Add("[$($r.Kind)] $($r.Name)")
-            [void]$out.Add("Category : $($r.Category)")
-            [void]$out.Add("Weight   : $($r.Weight)")
-            [void]$out.Add("Pattern  : $($r.Pattern)")
-            [void]$out.Add("File     : $($r.File)")
-            [void]$out.Add("Line     : $($r.Line)")
-            [void]$out.Add("Reason   : $($r.Reason)")
-            [void]$out.Add("Evidence : $($r.Evidence)")
-        }
-    }
-
+    [void]$out.Add('')
+    [void]$out.Add('NOTE: Matches are evidence leads. Review the exact log evidence before')
+    [void]$out.Add('making an enforcement decision.')
+    [void]$out.Add('')
+    [void]$out.Add('FINDINGS')
+    [void]$out.Add('------------------------------------------------------------')
+    if($script:Results.Count -eq 0){[void]$out.Add('No signatures matched the scanned logs.')}
+    else { foreach($r in $script:Results){[void]$out.Add('');[void]$out.Add("[$($r.Kind)] $($r.Name)");[void]$out.Add("Category : $($r.Category)");[void]$out.Add("Weight   : $($r.Weight)");[void]$out.Add("Pattern  : $($r.Pattern)");[void]$out.Add("File     : $($r.File)");[void]$out.Add("Line     : $($r.Line)");[void]$out.Add("Reason   : $($r.Reason)");[void]$out.Add("Evidence : $($r.Evidence)")} }
     return ($out -join [Environment]::NewLine)
 }
 
-function Copy-Text([string]$Text,[string]$Message) {
-    if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    try {
-        [Windows.Forms.Clipboard]::SetText($Text)
-        $status.Text = $Message
-    } catch {
-        [Windows.Forms.MessageBox]::Show(
-            "Windows could not access the clipboard. Try again.",
-            "LogsWarden"
-        ) | Out-Null
-    }
-}
-
-function Copy-AllResults {
-    if ($script:Results.Count -eq 0) {
-        [Windows.Forms.MessageBox]::Show(
-            "Run a scan first. There are no findings to copy.",
-            "LogsWarden"
-        ) | Out-Null
-        return
-    }
-    Copy-Text (Get-FullReportText) "FULL REPORT COPIED TO CLIPBOARD"
-}
-
-function Copy-SelectedEvidence {
-    if ($list.SelectedItems.Count -eq 0) {
-        [Windows.Forms.MessageBox]::Show(
-            "Select a finding first.",
-            "LogsWarden"
-        ) | Out-Null
-        return
-    }
-
-    $r = $list.SelectedItems[0].Tag
-    $text = @"
-[$($r.Kind)] $($r.Name)
-Category : $($r.Category)
-Weight   : $($r.Weight)
-Pattern  : $($r.Pattern)
-File     : $($r.File)
-Line     : $($r.Line)
-Reason   : $($r.Reason)
-Evidence : $($r.Evidence)
-"@
-    Copy-Text $text "SELECTED EVIDENCE COPIED"
+function Copy-Report {
+    if($script:Results.Count -eq 0){Write-Color '  No results to copy. Run a scan first.' Yellow; return}
+    $text=Get-FullReportText
+    try { Set-Clipboard -Value $text; Write-Color '  ✓ FULL REPORT COPIED TO CLIPBOARD' Green }
+    catch { $text | clip.exe; Write-Color '  ✓ FULL REPORT COPIED TO CLIPBOARD' Green }
 }
 
 function Save-Report {
-    if ($script:Results.Count -eq 0) {
-        [Windows.Forms.MessageBox]::Show(
-            "Run a scan first. There is no report to save.",
-            "LogsWarden"
-        ) | Out-Null
-        return
-    }
-
-    $dlg = New-Object Windows.Forms.SaveFileDialog
-    $dlg.Title = "Save LogsWarden Report"
-    $dlg.Filter = "Text report (*.txt)|*.txt|CSV findings (*.csv)|*.csv"
-    $dlg.FileName = "LogsWarden_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-
-    if ($dlg.ShowDialog() -ne "OK") { return }
-
-    try {
-        if ($dlg.FilterIndex -eq 2) {
-            $script:Results |
-                Select-Object Name,Kind,Category,Weight,Pattern,File,Line,Reason,Evidence |
-                Export-Csv -LiteralPath $dlg.FileName -NoTypeInformation -Encoding UTF8
-        } else {
-            [IO.File]::WriteAllText(
-                $dlg.FileName,
-                (Get-FullReportText),
-                (New-Object Text.UTF8Encoding($false))
-            )
-        }
-
-        $status.Text = "REPORT SAVED  •  $($dlg.FileName)"
-    } catch {
-        [Windows.Forms.MessageBox]::Show(
-            "Could not save the report.`n$($_.Exception.Message)",
-            "LogsWarden"
-        ) | Out-Null
-    }
+    if($script:Results.Count -eq 0){Write-Color '  No report available. Run a scan first.' Yellow; return}
+    $path=Read-Host '  Save report to (full path, or ENTER for desktop)'
+    if([string]::IsNullOrWhiteSpace($path)){ $path=Join-Path ([Environment]::GetFolderPath('Desktop')) ("LogsWarden_Report_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss')) }
+    try { [IO.File]::WriteAllText($path,(Get-FullReportText),(New-Object Text.UTF8Encoding($false))); Write-Color "  ✓ REPORT SAVED: $path" Green }
+    catch { Write-Color "  ✗ Could not save report: $($_.Exception.Message)" Red }
 }
 
-function Open-SelectedFile {
-    if ($list.SelectedItems.Count -eq 0) { return }
-
-    $r = $list.SelectedItems[0].Tag
-    if (Test-Path -LiteralPath $r.File) {
-        Start-Process notepad.exe -ArgumentList @($r.File)
+function Show-Summary {
+    Write-Header 'SCAN RESULTS / EVIDENCE REVIEW'
+    $assessment=Get-Assessment
+    $det=@($script:Results|Where-Object Kind -eq 'DETECTION')
+    $lead=@($script:Results|Where-Object Kind -eq 'LEAD')
+    Write-Color "  ASSESSMENT" DarkGray
+    switch -Regex($assessment){'^HIGH'{Write-Color "  $assessment" Red};'^MEDIUM|^LOW'{Write-Color "  $assessment" Yellow};'LEADS'{Write-Color "  $assessment" Magenta};default{Write-Color "  $assessment" Green}}
+    Write-Rule
+    Write-Color "  Files analyzed : $script:ScannedFiles" Gray
+    Write-Color "  Lines analyzed : $script:TotalLines" Gray
+    Write-Color "  Detections     : $($det.Count)" Gray
+    Write-Color "  Leads          : $($lead.Count)" Gray
+    Write-Color "  Scan time      : $script:ScanSeconds seconds" Gray
+    Write-Color ""
+    if($script:Results.Count -eq 0){Write-Color '  No signature matches found.' DarkGray; return}
+    Write-Color '  FINDINGS' Cyan
+    Write-Rule
+    $n=0
+    foreach($r in $script:Results){
+        $n++
+        $col=if($r.Kind -eq 'DETECTION'){[ConsoleColor]::Red}elseif($r.Weight -ge 16){[ConsoleColor]::Yellow}else{[ConsoleColor]::Magenta}
+        Write-Color ("  [{0:00}] {1}  +{2}" -f $n,$r.Name,$r.Weight) $col
+        Write-Color ("       {0} | {1} | line {2}" -f $r.Kind,[IO.Path]::GetFileName($r.File),$r.Line) DarkGray
+        Write-Color ("       {0}" -f $r.Evidence) Gray
     }
-}
-
-function Show-Selected {
-    if ($list.SelectedItems.Count -eq 0) {
-        $detail.Text = "Select a finding to inspect its exact evidence."
-        return
-    }
-
-    $r = $list.SelectedItems[0].Tag
-    $detail.Text = @"
-CLASSIFICATION
-$($r.Kind)
-
-SIGNATURE
-$($r.Name)
-
-CATEGORY
-$($r.Category)
-
-WEIGHT
-$($r.Weight)
-
-PATTERN
-$($r.Pattern)
-
-FILE
-$($r.File)
-
-LINE
-$($r.Line)
-
-REASON
-$($r.Reason)
-
-EXACT EVIDENCE
-$($r.Evidence)
-
-REVIEW NOTE
-A signature match is an indicator, not automatic proof.
-Check surrounding log lines and other evidence before making
-a moderation or enforcement decision.
-"@
 }
 
 function Choose-Folder {
-    $dlg = New-Object Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Choose the Minecraft / launcher folder to analyze"
-    $dlg.ShowNewFolderButton = $false
-
-    if ($dlg.ShowDialog() -eq "OK") {
-        $script:SelectedRoot = $dlg.SelectedPath
-        $pathLabel.Text = $script:SelectedRoot
-        $status.Text = "READY  •  FOLDER SELECTED"
-    }
+    $path=Read-Host '  Enter Minecraft / launcher log root path'
+    if(-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)){$script:SelectedRoot=(Resolve-Path -LiteralPath $path).Path;return $true}
+    Write-Color '  Invalid path.' Red; return $false
 }
 
 function Auto-Detect {
-    $roots = @(Get-DefaultRoots)
-
-    if ($roots.Count -eq 0) {
-        [Windows.Forms.MessageBox]::Show(
-            "LogsWarden could not find a standard Minecraft/launcher folder.`n`nUse SELECT FOLDER to choose it manually.",
-            "LogsWarden"
-        ) | Out-Null
-        return
-    }
-
-    $script:SelectedRoot = $roots[0]
-    $pathLabel.Text = $script:SelectedRoot
-
-    if ($roots.Count -gt 1) {
-        $status.Text = "AUTO-DETECTED  •  $($roots.Count) POSSIBLE LOCATIONS  •  USING FIRST"
-    } else {
-        $status.Text = "AUTO-DETECTED  •  READY"
-    }
+    $roots=@(Get-DefaultRoots)
+    if($roots.Count -eq 0){Write-Color '  No standard Minecraft/launcher locations found.' Yellow;return $false}
+    if($roots.Count -eq 1){$script:SelectedRoot=$roots[0];Write-Color "  ✓ AUTO-DETECTED: $($script:SelectedRoot)" Green;return $true}
+    Write-Color '  DETECTED LOCATIONS' Cyan
+    for($i=0;$i -lt $roots.Count;$i++){Write-Color ("  [{0}] {1}" -f ($i+1),$roots[$i]) Gray}
+    $choice=Read-Host '  Select location number (ENTER = 1)'
+    if([string]::IsNullOrWhiteSpace($choice)){$choice=1}
+    $num=0
+    if([int]::TryParse($choice,[ref]$num) -and $num -ge 1 -and $num -le $roots.Count){$script:SelectedRoot=$roots[$num-1];Write-Color "  ✓ SELECTED: $($script:SelectedRoot)" Green;return $true}
+    Write-Color '  Invalid selection.' Red;return $false
 }
 
 function Start-Scan {
-    if (-not $script:SelectedRoot) {
-        Auto-Detect
-    }
-
-    if (-not $script:SelectedRoot -or -not (Test-Path -LiteralPath $script:SelectedRoot)) {
-        Choose-Folder
-    }
-
-    if (-not $script:SelectedRoot -or -not (Test-Path -LiteralPath $script:SelectedRoot)) {
-        return
-    }
-
-    $files = @(Get-LogFiles $script:SelectedRoot)
-
-    if ($files.Count -eq 0) {
-        [Windows.Forms.MessageBox]::Show(
-            "No supported log/text files were found under:`n`n$($script:SelectedRoot)",
-            "LogsWarden"
-        ) | Out-Null
-        return
-    }
-
-    $scan.Enabled = $false
-    $choose.Enabled = $false
-    $auto.Enabled = $false
-    $cancel.Enabled = $true
-    $progress.Value = 0
-    $status.Text = "STARTING SCAN..."
-    $form.Refresh()
-
+    if(-not $script:SelectedRoot){ if(-not (Auto-Detect)){return} }
+    if(-not (Test-Path -LiteralPath $script:SelectedRoot)){ if(-not (Choose-Folder)){return} }
+    $files=@(Get-LogFiles $script:SelectedRoot)
+    if($files.Count -eq 0){Write-Color "  No supported log/text files found under: $script:SelectedRoot" Yellow;return}
     Scan-Logs $script:SelectedRoot
-
-    $scan.Enabled = $true
-    $choose.Enabled = $true
-    $auto.Enabled = $true
-    $cancel.Enabled = $false
-
-    Refresh-Stats
-    Refresh-List
-
-    $assessment = Get-Assessment
-
-    if ($script:Cancelled) {
-        $status.Text = "SCAN CANCELLED  •  PARTIAL RESULTS SHOWN"
-    } else {
-        $status.Text = "SCAN COMPLETE  •  $assessment  •  $($script:Results.Count) FINDINGS"
-    }
-
-    $resultsTab.Select()
 }
 
 function Clear-Results {
-    $script:Results = @()
-    $script:ScannedFiles = 0
-    $script:TotalLines = 0
-    $script:ScanSeconds = 0
-    $detail.Text = "Select a finding to inspect its exact evidence."
-    Refresh-Stats
-    Refresh-List
-    $status.Text = "RESULTS CLEARED"
+    $script:Results=@();$script:ScannedFiles=0;$script:TotalLines=0;$script:ScanSeconds=0
+    Write-Color '  ✓ RESULTS CLEARED' Green
 }
 
-# -----------------------------
-# GUI
-# -----------------------------
-$form = New-Object Windows.Forms.Form
-$form.Text = "LogsWarden — Minecraft Log Analyzer"
-$form.StartPosition = "CenterScreen"
-$form.Size = New-Object Drawing.Size(1280,820)
-$form.MinimumSize = New-Object Drawing.Size(1080,700)
-$form.BackColor = $BG
-$form.ForeColor = $TEXT
-$form.Font = New-Object Drawing.Font("Segoe UI",9)
-
-$title = New-Object Windows.Forms.Label
-$title.Text = "LOGSWARDEN"
-$title.Font = New-Object Drawing.Font("Segoe UI Semibold",21)
-$title.ForeColor = $ACCENT
-Add-Ui $form $title 24 18 260 38 | Out-Null
-
-$sub = New-Object Windows.Forms.Label
-$sub.Text = "MINECRAFT LOG ANALYZER  /  EVIDENCE REVIEW"
-$sub.ForeColor = $MUTED
-$sub.Font = New-Object Drawing.Font("Segoe UI",9)
-Add-Ui $form $sub 28 55 500 24 | Out-Null
-
-$auto = Make-Button "AUTO-DETECT"
-$auto.Add_Click({ Auto-Detect })
-Add-Ui $form $auto 750 24 125 34 | Out-Null
-
-$choose = Make-Button "SELECT FOLDER"
-$choose.Add_Click({ Choose-Folder })
-Add-Ui $form $choose 885 24 130 34 | Out-Null
-
-$scan = Make-Button "SCAN LOGS"
-$scan.BackColor = $ACCENT
-$scan.ForeColor = $BG
-$scan.Add_Click({ Start-Scan })
-Add-Ui $form $scan 1025 24 145 34 | Out-Null
-
-$pathLabel = New-Object Windows.Forms.Label
-$pathLabel.Text = "AUTO-DETECTING STANDARD MINECRAFT / LAUNCHER LOCATIONS..."
-$pathLabel.ForeColor = $MUTED
-$pathLabel.AutoEllipsis = $true
-Add-Ui $form $pathLabel 28 88 1140 24 | Out-Null
-
-# Stats cards
-$cardX = @(28,175,322,469,616,763)
-$cardTitles = @("FILES","LINES","DETECTIONS","LEADS","SCAN TIME","ASSESSMENT")
-$script:cardValues = @()
-
-for ($i=0; $i -lt 6; $i++) {
-    $p = New-Object Windows.Forms.Panel
-    $p.BackColor = $PANEL
-    Add-Ui $form $p $cardX[$i] 120 135 74 | Out-Null
-
-    $l = New-Object Windows.Forms.Label
-    $l.Text = $cardTitles[$i]
-    $l.ForeColor = $MUTED
-    $l.Font = New-Object Drawing.Font("Segoe UI Semibold",8)
-    Add-Ui $p $l 12 10 110 20 | Out-Null
-
-    $v = New-Object Windows.Forms.Label
-    $v.Text = "0"
-    $v.ForeColor = $TEXT
-    $v.Font = New-Object Drawing.Font("Segoe UI Semibold",13)
-    Add-Ui $p $v 12 31 118 32 | Out-Null
-
-    $script:cardValues += $v
+function Show-Menu {
+    Write-Header
+    $root=if($script:SelectedRoot){$script:SelectedRoot}else{'NOT SELECTED'}
+    Write-Color "  TARGET: $root" Gray
+    Write-Color ""
+    Write-Color "  ┌──────────────────────────────────────────────────────────────────────────┐" DarkCyan
+    Write-Color "  │  [1]  AUTO-DETECT & SCAN                                                 │" White
+    Write-Color "  │  [2]  SELECT FOLDER                                                      │" White
+    Write-Color "  │  [3]  SCAN SELECTED FOLDER                                               │" White
+    Write-Color "  │  [4]  SHOW RESULTS                                                       │" White
+    Write-Color "  │  [5]  COPY FULL REPORT                                                   │" White
+    Write-Color "  │  [6]  SAVE REPORT                                                        │" White
+    Write-Color "  │  [7]  CLEAR RESULTS                                                      │" White
+    Write-Color "  │  [8]  EXIT                                                               │" White
+    Write-Color "  └──────────────────────────────────────────────────────────────────────────┘" DarkCyan
+    Write-Color ""
+    Write-Color "  During a scan: press C or ESC to cancel." DarkYellow
+    Write-Color ""
 }
 
-$filesValue = $script:cardValues[0]
-$linesValue = $script:cardValues[1]
-$matchValue = $script:cardValues[2]
-$leadValue = $script:cardValues[3]
-$timeValue = $script:cardValues[4]
-$assessmentValue = $script:cardValues[5]
-
-$progress = New-Object Windows.Forms.ProgressBar
-$progress.Style = "Continuous"
-$progress.Minimum = 0
-$progress.Maximum = 100
-Add-Ui $form $progress 915 140 253 18 | Out-Null
-
-$status = New-Object Windows.Forms.Label
-$status.Text = "READY"
-$status.ForeColor = $MUTED
-Add-Ui $form $status 915 163 253 24 | Out-Null
-
-# Toolbar
-$search = New-Object Windows.Forms.TextBox
-$search.BackColor = $PANEL2
-$search.ForeColor = $TEXT
-$search.BorderStyle = "FixedSingle"
-$search.Font = New-Object Drawing.Font("Segoe UI",9)
-Add-Ui $form $search 28 210 300 32 | Out-Null
-
-$filter = New-Object Windows.Forms.ComboBox
-$filter.DropDownStyle = "DropDownList"
-$filter.BackColor = $PANEL2
-$filter.ForeColor = $TEXT
-[void]$filter.Items.AddRange(@(
-    "ALL","DETECTIONS","LEADS","HIGH","COMBAT","MOVEMENT","WORLD","AUTOMATION","SECURITY"
-))
-$filter.SelectedIndex = 0
-Add-Ui $form $filter 340 210 150 32 | Out-Null
-
-$clear = Make-Button "CLEAR"
-$clear.Add_Click({ Clear-Results })
-Add-Ui $form $clear 500 210 85 32 | Out-Null
-
-$copyAll = Make-Button "COPY FULL REPORT"
-$copyAll.Add_Click({ Copy-AllResults })
-Add-Ui $form $copyAll 595 210 145 32 | Out-Null
-
-$save = Make-Button "SAVE REPORT"
-$save.Add_Click({ Save-Report })
-Add-Ui $form $save 750 210 120 32 | Out-Null
-
-$cancel = Make-Button "CANCEL"
-$cancel.Enabled = $false
-$cancel.Add_Click({
-    $script:Cancelled = $true
-    $status.Text = "CANCELLING..."
-})
-Add-Ui $form $cancel 880 210 95 32 | Out-Null
-
-$shown = New-Object Windows.Forms.Label
-$shown.Text = "SHOWING 0 / 0"
-$shown.ForeColor = $MUTED
-Add-Ui $form $shown 990 214 180 24 | Out-Null
-
-# Main results list
-$list = New-Object Windows.Forms.ListView
-$list.View = "Details"
-$list.FullRowSelect = $true
-$list.GridLines = $true
-$list.HideSelection = $false
-$list.MultiSelect = $false
-$list.BackColor = $PANEL
-$list.ForeColor = $TEXT
-$list.BorderStyle = "FixedSingle"
-$list.Font = New-Object Drawing.Font("Segoe UI",9)
-[void]$list.Columns.Add("SIGNATURE",235)
-[void]$list.Columns.Add("TYPE",95)
-[void]$list.Columns.Add("WEIGHT",65)
-[void]$list.Columns.Add("CATEGORY",120)
-[void]$list.Columns.Add("FILE",205)
-[void]$list.Columns.Add("LINE",70)
-Add-Ui $form $list 28 255 785 475 | Out-Null
-
-# Detail panel
-$detailPanel = New-Object Windows.Forms.Panel
-$detailPanel.BackColor = $PANEL
-Add-Ui $form $detailPanel 828 255 340 475 | Out-Null
-
-$detailTitle = New-Object Windows.Forms.Label
-$detailTitle.Text = "EVIDENCE DETAIL"
-$detailTitle.Font = New-Object Drawing.Font("Segoe UI Semibold",10)
-$detailTitle.ForeColor = $ACCENT
-Add-Ui $detailPanel $detailTitle 16 14 300 25 | Out-Null
-
-$detail = New-Object Windows.Forms.TextBox
-$detail.Multiline = $true
-$detail.ReadOnly = $true
-$detail.ScrollBars = "Vertical"
-$detail.BackColor = $PANEL2
-$detail.ForeColor = $TEXT
-$detail.BorderStyle = "None"
-$detail.Font = New-Object Drawing.Font("Consolas",8.5)
-$detail.Text = "Select a finding to inspect its exact evidence."
-Add-Ui $detailPanel $detail 16 46 308 330 | Out-Null
-
-$copyEvidence = Make-Button "COPY SELECTED"
-$copyEvidence.Add_Click({ Copy-SelectedEvidence })
-Add-Ui $detailPanel $copyEvidence 16 389 135 38 | Out-Null
-
-$open = Make-Button "OPEN LOG"
-$open.Add_Click({ Open-SelectedFile })
-Add-Ui $detailPanel $open 160 389 148 38 | Out-Null
-
-$hint = New-Object Windows.Forms.Label
-$hint.Text = "Tip: double-click a row to open its log."
-$hint.ForeColor = $MUTED
-$hint.AutoEllipsis = $true
-Add-Ui $detailPanel $hint 16 438 308 25 | Out-Null
-
-# Search placeholder implemented as a label over the textbox.
-$searchHint = New-Object Windows.Forms.Label
-$searchHint.Text = "Search signature, category, file, evidence..."
-$searchHint.ForeColor = $MUTED
-Add-Ui $form $searchHint 36 214 280 24 | Out-Null
-$search.BringToFront()
-
-$search.Add_TextChanged({
-    $script:CurrentSearch = $search.Text
-    $searchHint.Visible = [string]::IsNullOrWhiteSpace($search.Text)
-    Refresh-List
-})
-
-$filter.Add_SelectedIndexChanged({
-    $script:CurrentFilter = [string]$filter.SelectedItem
-    Refresh-List
-})
-
-$list.Add_SelectedIndexChanged({ Show-Selected })
-$list.Add_DoubleClick({ Open-SelectedFile })
-
-# Resize
-$form.Add_Resize({
-    $w = $form.ClientSize.Width
-    $h = $form.ClientSize.Height
-
-    if ($w -lt 1080 -or $h -lt 700) { return }
-
-    $auto.Location = New-Object Drawing.Point($w-430,24)
-    $choose.Location = New-Object Drawing.Point($w-295,24)
-    $scan.Location = New-Object Drawing.Point($w-145,24)
-    $pathLabel.Size = New-Object Drawing.Size($w-56,24)
-
-    $progress.Location = New-Object Drawing.Point($w-253,140)
-    $status.Location = New-Object Drawing.Point($w-253,163)
-
-    $listW = [int]($w * 0.64)
-    $detailX = [int]($w * 0.66)
-    $detailW = [int]($w * 0.31)
-    $mainH = [int]($h - 350)
-
-    $list.Size = New-Object Drawing.Size($listW,$mainH)
-    $detailPanel.Location = New-Object Drawing.Point($detailX,255)
-    $detailPanel.Size = New-Object Drawing.Size($detailW,$mainH)
-
-    $detail.Size = New-Object Drawing.Size($detailPanel.Width-32,$detailPanel.Height-145)
-    $copyEvidence.Location = New-Object Drawing.Point(16,$detailPanel.Height-86)
-    $open.Location = New-Object Drawing.Point(160,$detailPanel.Height-86)
-    $hint.Location = New-Object Drawing.Point(16,$detailPanel.Height-38)
-})
-
-# Start in an immediately usable state.
-Auto-Detect
-Refresh-Stats
-Refresh-List
-
-# Friendly warning on close during scan.
-$form.Add_FormClosing({
-    if (-not $scan.Enabled) {
-        $script:Cancelled = $true
+while($true){
+    Show-Menu
+    $choice=Read-Host '  MODWARDEN >'
+    switch($choice.Trim().ToUpperInvariant()){
+        '1'{Auto-Detect|Out-Null;Start-Scan;Pause-Console}
+        '2'{Choose-Folder|Out-Null;Pause-Console}
+        '3'{Start-Scan;Pause-Console}
+        '4'{Show-Summary;Pause-Console}
+        '5'{Copy-Report;Pause-Console}
+        '6'{Save-Report;Pause-Console}
+        '7'{Clear-Results;Pause-Console}
+        '8'{Clear-Screen;Write-Color '  LogsWarden closed.' DarkGray;break}
+        default{Write-Color '  Invalid option. Choose 1-8.' Red;Start-Sleep -Milliseconds 700}
     }
-})
-
-[void]$form.ShowDialog()
+}
